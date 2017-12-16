@@ -41,8 +41,10 @@ class writer:
 		if self.ondisk:
 			self.f.write(msg)
 
-def main(argv):
-	
+def main():
+
+	argv = sys.argv
+
 	selfname = os.path.basename(argv[0])
 
 	parser = argparse.ArgumentParser(description='mix std{out,err}')
@@ -82,4 +84,4 @@ def main(argv):
 	w.out("{}:rc:{}\n".format(selfname, prog.returncode))
 
 if __name__ == '__main__':
-	sys.exit(main(sys.argv))
+	sys.exit(main())
