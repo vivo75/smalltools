@@ -22,6 +22,7 @@ import os
 import time
 import subprocess
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 
 
 class writer:
@@ -42,6 +43,19 @@ class writer:
 			self.f.write(msg)
 
 def main():
+	def pipe_consumer(seq, pipe):
+		line = pipe.readline()
+		while prog.poll() is None or line:
+			if line != "":
+				w.out("[{0:d},{1:.9f}] {2}".format(seq, time.monotonic(), line))
+				a=True
+			line = pipe.readline()
+
+	def stdout_consumer():
+		pipe_consumer(1, prog.stdout)
+
+	def stderr_consumer():
+		pipe_consumer(2, prog.stderr)
 
 	argv = sys.argv
 
@@ -73,15 +87,17 @@ def main():
 		errors = 'backslashreplace',
 		)
 
-	while prog.poll() is None or so or se:
-		so = prog.stdout.readline()
-		se = prog.stderr.readline()
-		if so != "":
-			w.out("[1,{0:.9f}] {1}".format(time.monotonic(), so))
-		if se != "":
-			w.out("[2,{0:.9f}] {1}".format(time.monotonic(), se))
+	executor = ThreadPoolExecutor(max_workers=2)
+	so = executor.submit(stdout_consumer)
+	se = executor.submit(stderr_consumer)
 
-	w.out("{}:rc:{}\n".format(selfname, prog.returncode))
+	# wait for the children program to stop
+	prog.wait()
+	# and for the threads to flush all data
+	while so.done() and se.done():
+		time.sleep(0.05)
+
+	w.out("{}:retcode:{}\n".format(selfname, prog.returncode))
 
 if __name__ == '__main__':
 	sys.exit(main())
