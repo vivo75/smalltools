@@ -100,6 +100,7 @@ def main():
 		time.sleep(0.05)
 
 	w.out("{}:retcode:{}\n".format(selfname, prog.returncode))
+	return prog.returncode
 
 if __name__ == '__main__':
 	sys.exit(main())
