@@ -6,7 +6,6 @@ import signal
 import sys
 # This block ensures that ^C interrupts are handled quietly.
 try:
-
 	def exithandler(signum, _frame):
 		signal.signal(signal.SIGINT, signal.SIG_IGN)
 		signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -44,8 +43,11 @@ class writer:
 
 def main():
 	def pipe_consumer(seq, pipe):
-		line = pipe.readline()
-		while prog.poll() is None or line:
+		if pipe.readable:
+			line = pipe.readline()
+		else:
+			line = None
+		while prog.poll() is None or line not in (None, ""):
 			if line != "":
 				w.out("[{0:d},{1:.9f}] {2}".format(seq, time.monotonic(), line))
 				a=True
@@ -94,7 +96,7 @@ def main():
 	# wait for the children program to stop
 	prog.wait()
 	# and for the threads to flush all data
-	while so.done() and se.done():
+	while so.running() or se.running():
 		time.sleep(0.05)
 
 	w.out("{}:retcode:{}\n".format(selfname, prog.returncode))
