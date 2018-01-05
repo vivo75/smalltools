@@ -18,6 +18,7 @@ setup(
     url='https://github.com/vivo75/smalltools',
     author='Francesco Riosa',
     author_email='vivo75+smalltools@gmail.com',
+    include_package_data=True,
 
     # For a list of valid classifiers, see
     # https://pypi.python.org/pypi?%3Aaction=list_classifiers
@@ -34,6 +35,7 @@ setup(
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
+        'Programming Language :: Unix Shell',
     ],
 
     # Note that this is a string of words separated by whitespace, not a list.
@@ -47,4 +49,15 @@ setup(
             'stlog = stlog:main',
         ],
     },
+    data_files = [
+        ('/etc/zfs-pull-snap.d', ['etc/zfs-pull-snap.d/conf1.site.example']),
+    ],
+    scripts = [
+        'bash/zfs-pull-snap'
+    ],
 )
+
+# kate: encoding utf-8; eol unix; syntax Python;
+# kate: indent-width 4; mixedindent off; replace-tabs on;
+# kate: remove-trailing-space on; space-indent on;
+# kate: word-wrap-column 500; word-wrap off;

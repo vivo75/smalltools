@@ -1,0 +1,2 @@
+include README.md
+include etc/zfs-pull-snap.d/conf1.site.example

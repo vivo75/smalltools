@@ -1,0 +1,329 @@
+#! /bin/bash
+
+# Copyright 2012-2017 Francesco Riosa
+# Distributed under the terms of the GNU General Public License v2
+
+# @AUTHOR:
+# Francesco Riosa <fr@f1r.eu>
+# @BLURB: fetch incremental zfs snapshots from a remote host
+# @DESCRIPTION:
+#   This program fetch snapshots produced by ZFS on linux "zfs-auto-snapshot"
+#   script.
+#   Moving data is done incrementally, starting with latest common snapshot
+#   present on both machine including the latest snapshot of the remote host.
+#   Dependancies are ZOL zfs, zfs-auto-snapshot, util-linux, openssh
+#   and optionally sudo (remote machine)
+#   Config files are located in /etc/zfs-pull-snap.d/*.site
+#   Every *.site file is required to set some variables, see conf1.site.example
+#   for which ones.
+
+###############################################################################
+####  initialization and checks
+###############################################################################
+
+[[ -e ${HOME}/etc/${0}.conf ]] && source ${HOME}/etc/${0}.conf
+
+# we want boring english messagges
+LC_ALL=C
+
+# associative array for commands (local machine)
+declare -A cmd
+
+# check that we are root
+if test ${UID} -ne 0 ; then
+    echo "ERROR: need root privileges"
+fi
+
+# initialize the cmd array it will be possible to call the command
+# as `${cmd[zfs]}` if command is missing exit with error
+for c in flock logger zfs zfs-auto-snapshot ; do
+    cmd[${c}]=$( type -p ${c} )
+    if [[ ${cmd[${c}]} == "" ]] ; then
+        echo "ERROR: command \"${c}\" not found! Exiting now."
+        exit 1
+    fi
+done
+
+print_log () # level, message, ...
+{
+    local prefix=zfs-pull-snap
+    local level=${1}
+    shift 1
+
+    case ${level} in
+        eme*)
+            ${cmd[logger]} -t "${prefix}" -p daemon.emerge ${@}
+            echo Emergency: ${@} 1>&2
+            ;;
+        ale*)
+            ${cmd[logger]} -t "${prefix}" -p daemon.alert ${@}
+            echo Alert: ${@} 1>&2
+            ;;
+        cri*)
+            ${cmd[logger]} -t "${prefix}" -p daemon.crit ${@}
+            echo Critical: ${@} 1>&2
+            ;;
+        err*)
+            ${cmd[logger]} -t "${prefix}" -p daemon.err ${@}
+            echo Error: ${@} 1>&2
+            ;;
+        war*)
+            ${cmd[logger]} -t "${prefix}" -p daemon.warning ${@}
+            #test -z "$opt_quiet" && echo Warning: ${@} 1>&2
+            ;;
+        not*)
+            ${cmd[logger]} -t "${prefix}" -p daemon.notice ${@}
+            #test -z "$opt_quiet" && echo ${@}
+            ;;
+        inf*)
+            : #test -z ${opt_quiet+x} && test -n "$opt_verbose" && echo ${@}
+            ;;
+        deb*)
+            : # test -n "$opt_debug" && echo Debug: ${@}
+            ;;
+        *)
+            ${cmd[logger]} -t "${0}" ${@}
+            echo ${@} 1>&2
+            ;;
+    esac
+}
+
+###############################################################################
+####  functions
+###############################################################################
+
+# @FUNCTION: get_remote_fs_list
+# @USAGE: <pool>
+# @DESCRIPTION:
+# Get the list of filesystems from a remote site
+# The pool is excluded, both from list and from the name of the filesystem
+# @EXAMPLE:
+# declare -a filesystems=( $( get_remote_fs_list thez tank-thez ) )
+function get_remote_fs_list() {
+    local pool=${1}
+    ${rcmd[zfs]} list -Hpr -t filesystem -o name -s name ${pool} \
+    | tail -n +2 \
+    | sed -e "s:^${pool}/::"
+}
+
+# @FUNCTION: get_local_newest_snap
+# @USAGE: <filesystem>
+# @DESCRIPTION:
+# Get name of most recent snapshot from filesystem.
+# without the filesystem part
+# @EXAMPLE:
+# get_local_newest_snap P000204/pnpitalia/lxc/a037-ftp
+# @zfs-auto-snap_daily-2018-01-02-1230
+function get_local_newest_snap() {
+    local fs=${1}
+    ${cmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation ${fs} \
+    | head -n 1 \
+    | sed -e "s:^${fs}::"
+}
+
+# @FUNCTION: get_remote_newest_snap
+# @USAGE: <filesystem>
+# @DESCRIPTION:
+# Get name of most recent snapshot from remote site.
+# without the filesystem part
+# @EXAMPLE:
+# get_remote_newest_snap thez tank-thez/lxc/a037-ftp
+# @zfs-auto-snap_frequent-2018-01-04-2200
+function get_remote_newest_snap() {
+    local fs=${1}
+    ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${fs} \
+    | head -n 1 \
+    | sed -e "s:^${fs}::"
+}
+
+# @FUNCTION: reconcile_snap
+# @USAGE: <local_filesystem> <remote_filesystem>
+# @DESCRIPTION:
+# In case last local snapshot is not present remotely a reconciliation is needed
+# the algorithm used here only work with snapshot which have date in the form
+# YYYY-MM-DD... into the snapshot name, luckily this is the case of zfs-auto-snapshot
+# @EXAMPLE:
+# reconcile_snap thez tank-thez/lxc/a037-ftp
+# @zfs-auto-snap_frequent-2018-01-04-2200
+function reconcile_snap() {
+    local lfs=${1}
+    local rfs=${2}
+
+    # 1) get the common snapshots
+    # 2) sort them by date/time
+    # 3) pick the latest
+    comm -12 --nocheck-order \
+        <( ${cmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation ${lfs} | sed -e "s:^${lfs}::" | sort -u ) \
+        <( ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${rfs} | sed -e "s:^${rfs}::" | sort -u ) \
+    | sed -e "s:\(^.*\)\(20[0-9][0-9].*$\):\2,\0:" \
+    | sort -ur \
+    | head -n 1 \
+    | sed -e 's:^.*,::'
+
+}
+
+# @FUNCTION: filter_array
+# @USAGE: <array[@]>
+# @DESCRIPTION:
+# use global variable ${FS_SKIP} to remove matching strings
+# from given array.
+# ${FS_SKIP} is also an array of regular expressions these
+# are used by bash =~ comparison operator
+# @EXAMPLE:
+# filter_array $( get_remote_fs_list thez tank-thez )
+function filter_array() {
+    local ko=0
+    for i in ${@} ; do
+        ko=0
+        for filter in ${FS_SKIP[@]} ; do
+            if [[ ${i} =~ ${filter} ]] ; then
+                ko=1
+                break
+            fi
+        done
+        [[ ${ko} == 0 ]] && echo ${i}
+    done
+}
+
+# @FUNCTION: send_receive_fs
+# @USAGE: <src_filesystem> <dst_filesystem>
+# @DESCRIPTION:
+# Send and Receive zfs stream
+# @EXAMPLE:
+# send_receive_fs thez tank-thez P000204/pnpitalia
+function send_receive_fs() {
+    # remote filesystem/pool
+    local fs=${1}
+    # destination (local) filesystem
+    local dst=${2}
+    # last snap on current pool, will be the base point for the incremental send
+    local current_snap=$( get_local_newest_snap ${dst} )
+    # last snap on the remote filesystem
+    local remote_snap=$( get_remote_newest_snap ${fs} )
+    # return code
+    local rc=0
+
+    # variables for snapshot cleanup
+    local k
+    local keep_num
+    local keep_label
+
+    if [[ ${current_snap} == ${remote_snap} ]] ; then
+        print_log notice "${fs}${current_snap} is alreay up to date"
+    else
+        print_log notice "${fs}${current_snap} => ${remote_snap}"
+        ${rcmd[zfs]} send -I \
+            ${fs}${current_snap} \
+            ${fs}${remote_snap} \
+        | ${cmd[zfs]} recv -du -x mountpoint ${dst} # /${fs}
+        rc=${?}
+        if [[ ${rc} != 0 ]]; then
+            print_log error "failed ${fs}${current_snap} => ${remote_snap} (${rc})"
+        fi
+
+        # destroy old snapshot if transfer was succesful
+        if [[ ${rc} == 0 ]] ; then
+            for k in ${KEEP_SNAP[@]} ; do
+                keep_num=${k%,*}
+                keep_label="${k#*,}"
+                ${cmd[zfs-auto-snapshot]} --quiet --syslog --destroy-only \
+                    --label="${keep_label}" --keep=${keep_num} \
+                    ${dst}
+            done
+        else
+            # try once more, no deletion this time
+            current_snap=$( reconcile_snap ${dst} ${fs} )
+            # NOTICE that we FORCE rewind to common snapshot locally
+            ${rcmd[zfs]} send -I \
+                ${fs}${current_snap} \
+                ${fs}${remote_snap} \
+            | ${cmd[zfs]} recv -F -du -x mountpoint ${dst} # /${fs}
+            rc=${?}
+            if [[ ${rc} != 0 ]]; then
+                print_log critical "critical: ${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation failed"
+            else
+                print_log warning "RECONCILIATION: ${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation succeded"
+            fi
+        fi
+    fi # [[ ${current_snap} == ${remote_snap} ]]
+
+    return ${rc}
+}
+
+# @FUNCTION: send_receive_pool
+# @USAGE: <src_pool> <dst_pool/dst_filesystem>
+# @DESCRIPTION:
+# Recursively Send and Receive a pool
+# filesystems are looped, send is _not_ recursive (i.e. no -r)
+# @EXAMPLE:
+# send_receive_pool thez tank-thez P000204/pnpitalia
+function send_receive_pool() {
+    local remote_pool=${1}
+    local local_pool=${2}
+    local ret=0
+
+    # pool
+    send_receive_fs ${remote_pool} ${local_pool}
+    ret=$(( ${ret} + ${?} ))
+
+    # loop for all known filesystems
+    for fs in $( filter_array $( get_remote_fs_list ${remote_pool} ) ) ; do
+        send_receive_fs ${remote_pool}/${fs} ${local_pool}/${fs}
+        ret=$(( ${ret} + ${?} ))
+    done
+
+    if [[ ${ret} != 0 ]] ; then
+        print_log error "error: at least one send/receive has failed"
+    fi
+    return ${ret}
+}
+
+###############################################################################
+####  main
+###############################################################################
+
+(
+    # Wait for lock on /run/${0}.lock (fd 200) for 10 seconds
+    ${cmd[flock]} -x -w 10 200 || exit 1
+
+    for conf in ${HOME}/etc/zfs-pull-snap.d/*.pool ; do
+        [[ -e "${conf}" ]] && (
+
+                source "${conf}"
+
+                #### initialization of variables requiring remote #############
+                # associative array for commands (remote machine)
+                declare -A rcmd
+
+                # initialize our ssh cmd
+                cmd[ssh]="$( type -p ssh ) ${REMOTE_HOST} -- "
+
+                # check that we are root remotely
+                if ${cmd[ssh]} 'test ${UID} -ne 0' ; then
+                    cmd[ssh]="${cmd[ssh]} sudo "
+                    if ! cmd[ssh] ls / > /dev/null ; then
+                        print_log critical "critical: cannot execute sudo remotely (on ${REMOTE_HOST}) and I'm not root"
+                    fi
+                fi
+                # initialize the rcmd array it will be possible to call the command
+                # as `${rcmd[zfs]}` if command is missing exit with error
+                for c in zfs zfs-auto-snapshot ; do
+                    rcmd[${c}]=$( ssh ${REMOTE_HOST} -- type -p ${c} )
+                    if [[ ${rcmd[${c}]} == "" ]] ; then
+                        print_log critical "critical: remote command \"${c}\" not found (on ${REMOTE_HOST})! Exiting now."
+                        exit 1
+                    fi
+                    rcmd[${c}]="${cmd[ssh]} ${rcmd[${c}]}"
+                done
+                ###############################################################
+
+                send_receive_pool ${REMOTE_POOL} ${LOCAL_POOL}
+        )
+    done
+
+) 200>/run/${0}.lock
+
+# kate: encoding utf-8; eol unix; syntax Bash;
+# kate: indent-width 4; mixedindent off; replace-tabs on;
+# kate: remove-trailing-space on; space-indent on;
+# kate: word-wrap-column 500; word-wrap off;

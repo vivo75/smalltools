@@ -1,0 +1,43 @@
+#
+# Example configuration file
+# zfs-pull-snap will loop for all *.site files found in this directory
+
+# required
+# host to use with ssh.
+# it's very possible to have a specific entry in ~/.ssh/config
+# for this host, for example:
+#
+# Host myremote-host
+#     Hostname 1.2.3.4
+#     user my_sudo_enabled_user
+#     IdentityFile ~/.ssh/id_ed25519
+#     ControlMaster auto
+#     ControlPath ~/.ssh/master-%r@%h:%p.socket
+#     ControlPersist 5m
+REMOTE_HOST=myremote-host
+
+# required
+# pool name on remote host
+REMOTE_POOL=tank
+
+# required
+# destination pool or filesystem for zfs receive
+LOCAL_POOL=tank/filesystem
+
+# optional
+# an array of values map to snapshot names done by `zfs-auto-snapshot`
+# used to cleanup old snapshot, keep them forever if empty
+declare -a KEEP_SNAP=( \
+    4,frequent \
+    5,daily \
+    4,weekly \
+    12,montly \
+)
+
+# regular expression list of filesystem to exclude
+declare -a FS_SKIP=( ^lxc/test ^lxc/ephemeral )
+
+# kate: encoding utf-8; eol unix; syntax Bash;
+# kate: indent-width 4; mixedindent off; replace-tabs on;
+# kate: remove-trailing-space on; space-indent on;
+# kate: word-wrap-column 500; word-wrap off;
