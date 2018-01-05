@@ -21,7 +21,7 @@
 ####  initialization and checks
 ###############################################################################
 
-[[ -e ${HOME}/etc/${0}.conf ]] && source ${HOME}/etc/${0}.conf
+[[ -e ${HOME}/etc/${0##*/}.conf ]] && source ${HOME}/etc/${0##*/}.conf
 
 # we want boring english messagges
 LC_ALL=C
@@ -82,7 +82,7 @@ print_log () # level, message, ...
             : # test -n "$opt_debug" && echo Debug: ${@}
             ;;
         *)
-            ${cmd[logger]} -t "${0}" ${@}
+            ${cmd[logger]} -t "${0##*/}" ${@}
             echo ${@} 1>&2
             ;;
     esac
@@ -283,7 +283,7 @@ function send_receive_pool() {
 ###############################################################################
 
 (
-    # Wait for lock on /run/${0}.lock (fd 200) for 10 seconds
+    # Wait for lock on /run/${0##*/}.lock (fd 200) for 10 seconds
     ${cmd[flock]} -x -w 10 200 || exit 1
 
     for conf in ${HOME}/etc/zfs-pull-snap.d/*.pool ; do
@@ -321,7 +321,7 @@ function send_receive_pool() {
         )
     done
 
-) 200>/run/${0}.lock
+) 200>/run/${0##*/}.lock
 
 # kate: encoding utf-8; eol unix; syntax Bash;
 # kate: indent-width 4; mixedindent off; replace-tabs on;
