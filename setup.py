@@ -50,7 +50,7 @@ setup(
         ],
     },
     data_files = [
-        ('/etc/zfs-pull-snap.d', ['etc/zfs-pull-snap.d/conf1.site.example']),
+        ('/etc/zfs-pull-snap.d', ['etc/zfs-pull-snap.d/conf1.pool.example']),
     ],
     scripts = [
         'bash/zfs-pull-snap'

@@ -1,6 +1,6 @@
 #
 # Example configuration file
-# zfs-pull-snap will loop for all *.site files found in this directory
+# zfs-pull-snap will loop for all *.pool files found in this directory
 
 # required
 # host to use with ssh.
@@ -29,6 +29,7 @@ LOCAL_POOL=tank/filesystem
 # used to cleanup old snapshot, keep them forever if empty
 declare -a KEEP_SNAP=( \
     4,frequent \
+    24,hourly \
     5,daily \
     4,weekly \
     12,montly \
