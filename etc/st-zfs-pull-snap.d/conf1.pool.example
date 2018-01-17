@@ -1,6 +1,6 @@
 #
 # Example configuration file
-# zfs-pull-snap will loop for all *.pool files found in this directory
+# st-zfs-pull-snap will loop for all *.pool files found in this directory
 
 # required
 # host to use with ssh.
