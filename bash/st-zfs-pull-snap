@@ -26,6 +26,11 @@
 # we want boring english messagges
 LC_ALL=C
 
+# compression related variables
+COMPRESS="${COMPRESS:=lz4}"
+#COMPRESS_FLAGS=${COMPRESS_FLAGS:=}
+UNCOMPRESS_FLAGS="${UNCOMPRESS_FLAGS:=-dcfm}"
+
 # associative array for commands (local machine)
 declare -A cmd
 
@@ -36,7 +41,7 @@ fi
 
 # initialize the cmd array it will be possible to call the command
 # as `${cmd[zfs]}` if command is missing exit with error
-for c in flock logger zfs zfs-auto-snapshot ; do
+for c in flock logger zfs zfs-auto-snapshot ${COMPRESS} ; do
     cmd[${c}]=$( type -p ${c} )
     if [[ ${cmd[${c}]} == "" ]] ; then
         echo "ERROR: command \"${c}\" not found! Exiting now."
@@ -101,7 +106,7 @@ print_log () # level, message, ...
 # declare -a filesystems=( $( get_remote_fs_list thez tank-thez ) )
 function get_remote_fs_list() {
     local pool=${1}
-    ${rcmd[zfs]} list -Hpr -t filesystem -o name -s name ${pool} \
+    ${cmd[ssh]} ${rcmd[zfs]} list -Hpr -t filesystem -o name -s name ${pool} \
     | tail -n +2 \
     | sed -e "s:^${pool}/::"
 }
@@ -131,7 +136,7 @@ function get_local_newest_snap() {
 # @zfs-auto-snap_frequent-2018-01-04-2200
 function get_remote_newest_snap() {
     local fs=${1}
-    ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${fs} \
+    ${cmd[ssh]} ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${fs} \
     | head -n 1 \
     | sed -e "s:^${fs}::"
 }
@@ -154,7 +159,7 @@ function reconcile_snap() {
     # 3) pick the latest
     comm -12 --nocheck-order \
         <( ${cmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation ${lfs} | sed -e "s:^${lfs}::" | sort -u ) \
-        <( ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${rfs} | sed -e "s:^${rfs}::" | sort -u ) \
+        <( ${cmd[ssh]} ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${rfs} | sed -e "s:^${rfs}::" | sort -u ) \
     | sed -e "s:\(^.*\)\(20[0-9][0-9].*$\):\2,\0:" \
     | sort -ur \
     | head -n 1 \
@@ -212,10 +217,15 @@ function send_receive_fs() {
         print_log notice "${fs}${current_snap} is alreay up to date"
     else
         print_log notice "${fs}${current_snap} => ${remote_snap}"
-        ${rcmd[zfs]} send -I \
-            ${fs}${current_snap} \
-            ${fs}${remote_snap} \
+        ${cmd[ssh]} "( \
+	    ${rcmd[zfs]} send -I \
+                ${fs}${current_snap} \
+                ${fs}${remote_snap} \
+            | ${rcmd[${COMPRESS}]} ${COMPRESS_FLAGS} \
+        )" \
+        | ${COMPRESS} ${UNCOMPRESS_FLAGS} \
         | ${cmd[zfs]} recv -du -x mountpoint ${dst} # /${fs}
+
         rc=${?}
         if [[ ${rc} != 0 ]]; then
             print_log error "failed ${fs}${current_snap} => ${remote_snap} (${rc})"
@@ -234,13 +244,17 @@ function send_receive_fs() {
             # try once more, no deletion this time
             current_snap=$( reconcile_snap ${dst} ${fs} )
             # NOTICE that we FORCE rewind to common snapshot locally
+            ${cmd[ssh]} "( \
             ${rcmd[zfs]} send -I \
-                ${fs}${current_snap} \
-                ${fs}${remote_snap} \
+                    ${fs}${current_snap} \
+                    ${fs}${remote_snap} \
+                | ${rcmd[${COMPRESS}]} ${COMPRESS_FLAGS} \
+            )" \
+            | ${COMPRESS} ${UNCOMPRESS_FLAGS} \
             | ${cmd[zfs]} recv -F -du -x mountpoint ${dst} # /${fs}
             rc=${?}
             if [[ ${rc} != 0 ]]; then
-                print_log critical "critical: ${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation failed"
+                print_log critical "${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation failed"
             else
                 print_log warning "RECONCILIATION: ${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation succeded"
             fi
@@ -307,13 +321,12 @@ function send_receive_pool() {
                 fi
                 # initialize the rcmd array it will be possible to call the command
                 # as `${rcmd[zfs]}` if command is missing exit with error
-                for c in zfs zfs-auto-snapshot ; do
+                for c in zfs zfs-auto-snapshot ${COMPRESS} ; do
                     rcmd[${c}]=$( ssh ${REMOTE_HOST} -- type -p ${c} )
                     if [[ ${rcmd[${c}]} == "" ]] ; then
                         print_log critical "critical: remote command \"${c}\" not found (on ${REMOTE_HOST})! Exiting now."
                         exit 1
                     fi
-                    rcmd[${c}]="${cmd[ssh]} ${rcmd[${c}]}"
                 done
                 ###############################################################
 

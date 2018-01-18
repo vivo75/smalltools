@@ -25,6 +25,22 @@ REMOTE_POOL=tank
 LOCAL_POOL=tank/filesystem
 
 # optional
+# Compress/uncompress program, must be able to write/read a stream
+# to stdout/stdin.
+# Use `cat` with empty flags to avoid compression
+# COMPRESS="lz4"
+
+# optional
+# Flag used when compressing the stream
+# empty by default
+# COMPRESS_FLAGS=""
+
+# required if ${COMPRESS} is not default
+# At least one flag is needed (usually "-d") to tell the compress program
+# that it should de-compress instead.
+# UNCOMPRESS_FLAGS="-dcfm"
+
+# optional
 # an array of values map to snapshot names done by `zfs-auto-snapshot`
 # used to cleanup old snapshot, keep them forever if empty
 declare -a KEEP_SNAP=( \
