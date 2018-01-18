@@ -218,7 +218,7 @@ function send_receive_fs() {
     else
         print_log notice "${fs}${current_snap} => ${remote_snap}"
         ${cmd[ssh]} "( \
-	    ${rcmd[zfs]} send -I \
+        ${rcmd[zfs]} send -I \
                 ${fs}${current_snap} \
                 ${fs}${remote_snap} \
             | ${rcmd[${COMPRESS}]} ${COMPRESS_FLAGS} \
