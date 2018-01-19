@@ -13,7 +13,7 @@
 #   present on both machine including the latest snapshot of the remote host.
 #   Dependancies are ZOL zfs, zfs-auto-snapshot, util-linux, openssh
 #   and optionally sudo (remote machine)
-#   Config files are located in /etc/st-zfs-pull-snap.d/*.pool
+#   Config files are located in /etc/st-zfs-send-recv.d/*.pool
 #   Every *.pool file is required to set some variables, see conf1.pool.example
 #   for which ones.
 
@@ -51,7 +51,7 @@ done
 
 print_log () # level, message, ...
 {
-    local prefix=st-zfs-pull-snap
+    local prefix=st-zfs-send-recv
     local level=${1}
     shift 1
 
@@ -300,7 +300,7 @@ function send_receive_pool() {
     # Wait for lock on /run/${0##*/}.lock (fd 200) for 10 seconds
     ${cmd[flock]} -x -w 10 200 || exit 1
 
-    for conf in /etc/st-zfs-pull-snap.d/*.pool ; do
+    for conf in /etc/st-zfs-send-recv.d/*.pool ; do
         [[ -e "${conf}" ]] && (
 
                 source "${conf}"

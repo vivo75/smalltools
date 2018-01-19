@@ -1,5 +1,5 @@
-#!python
-# Copyright 2017 Francesco Riosa
+#!/usr/bin/env python
+# Copyright 2017-2018 Francesco Riosa <vivo75+smalltools@gmail.com>
 # Distributed under the terms of the GNU General Public License v2
 
 import signal
@@ -104,3 +104,8 @@ def main():
 
 if __name__ == '__main__':
 	sys.exit(main())
+
+# vim:fileencoding=utf-8
+# kate: syntax Python; encoding utf-8; eol unix; indent-pasted-text false;
+# kate: tab-width 4; indent-width 4; show-tabs true; keep-extra-spaces false;
+# kate: remove-trailing-space on; word-wrap-column 120; line-numbers true;
