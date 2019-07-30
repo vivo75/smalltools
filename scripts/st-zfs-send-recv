@@ -16,18 +16,13 @@
 #   Config files are located in /etc/st-zfs-send-recv.d/*.pool
 #   Every *.pool file is required to set some variables, see conf1.pool.example
 #   for which ones.
-
-###############################################################################
-####  initialization and checks
-###############################################################################
+# TODO: unify (remote == src) && (local == dst)
 
 if [[ -e /etc/${0##*/}.conf ]] ; then
     source /etc/${0##*/}.conf
-else
-    echo "missing config file: '/etc/${0##*/}.conf'"
-    exit 1
 fi
 
+# TODO: move into library
 print_log () # level, message, ...
 {
     local prefix=st-zfs-send-recv
@@ -73,6 +68,34 @@ print_log () # level, message, ...
 }
 
 
+# @FUNCTION: filter_array
+# @USAGE: <array[@]>
+# @DESCRIPTION:
+# use global variable ${FS_SKIP} to remove matching strings
+# from given array.
+# ${FS_SKIP} is also an array of regular expressions these
+# are used by bash =~ comparison operator
+# @EXAMPLE:
+# filter_array $( get_remote_fs_list thez tank-thez )
+# TODO: move into library
+function filter_array() {
+    local ko=0
+    for i in ${@} ; do
+        ko=0
+        for filter in ${FS_SKIP[@]} ; do
+            if [[ ${i} =~ ${filter} ]] ; then
+                ko=1
+                break
+            fi
+        done
+        [[ ${ko} == 0 ]] && echo ${i}
+    done
+}
+
+###############################################################################
+####  initialization and checks
+###############################################################################
+
 # we want boring english messagges
 LC_ALL=C
 
@@ -100,118 +123,233 @@ for c in flock logger zfs zfs-auto-snapshot sqlite3 ${COMPRESS} ; do
     fi
 done
 
+
 ###############################################################################
 ####  functions
 ###############################################################################
 
+# @FUNCTION: initialize_db
+# @USAGE: <dbpath>
+# @DESCRIPTION:
+# Initialize the database
+function initialize_db() {
+    local dbpath=${1}
+
+    cat << 'EOSQL' | ${cmd[sqlite3]} "${dbpath}"
+    CREATE TABLE IF NOT EXISTS fs_src (
+      "pool" TEXT NOT NULL,
+      "guid" TEXT NOT NULL PRIMARY KEY,
+      "createtxg" TEXT NOT NULL,
+      "creation" TEXT NOT NULL,
+      "type" TEXT NOT NULL,
+      "used" TEXT NOT NULL,
+      "name" TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS fs_dst (
+      "pool" TEXT NOT NULL,
+      "guid" TEXT NOT NULL PRIMARY KEY,
+      "createtxg" TEXT NOT NULL,
+      "creation" TEXT NOT NULL,
+      "type" TEXT NOT NULL,
+      "used" TEXT NOT NULL,
+      "name" TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS snap_src (
+      "parent_guid" TEXT NOT NULL,
+      "guid" TEXT NOT NULL PRIMARY KEY,
+      "createtxg" TEXT NOT NULL,
+      "creation" TEXT NOT NULL,
+      "type" TEXT NOT NULL,
+      "used" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "snapshot" TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS snap_dst (
+      "parent_guid" TEXT NOT NULL,
+      "guid" TEXT NOT NULL PRIMARY KEY,
+      "createtxg" TEXT NOT NULL,
+      "creation" TEXT NOT NULL,
+      "type" TEXT NOT NULL,
+      "used" TEXT NOT NULL,
+      "name" TEXT NOT NULL,
+      "snapshot" TEXT NOT NULL
+    );
+    DELETE FROM fs_src;
+    DELETE FROM fs_dst;
+    DELETE FROM snap_src;
+    DELETE FROM snap_dst;
+EOSQL
+}
+
+# @FUNCTION: discover_fs_list
+# @USAGE: <zcmd> <dbpath> <table_suffix> <pool>
+# @DESCRIPTION:
+# Get the list of filesystems from zfs pool
+# @GLOBAL: cmd
+# @EXAMPLE:
+# discover_fs_list "ssh host -- zfs" my-sqlite.db src my_pool
+# discover_fs_list "${cmd[ssh]} ${rcmd[zfs]}" ./pippo.db src P000701
+# discover_fs_list zfs ./pippo.db dst traid1
+function discover_fs_list() {
+    local zcmd=${1}
+    local dbpath=${2}
+    local table_suffix=${3}
+    local pool=${4}
+    ${zcmd} list \
+        -Hpr \
+        -t filesystem,volume \
+        -o guid,createtxg,creation,type,used,name \
+        -s name \
+        ${pool} \
+    | sed \
+        -e "s:^:${pool}|:" \
+        -e 's:\t:|:g' \
+    | ${cmd[sqlite3]} \
+        -csv \
+        -separator '|' \
+        ${dbpath} \
+        '.import /dev/stdin 'fs_${table_suffix}
+}
+
+# @FUNCTION: discover_snapshots
+# @USAGE: <zcmd> <dbpath> <table_suffix> <filesystem> <pool>
+# @DESCRIPTION:
+# Fill the snapshot table with 1000 most recent snapshots
+# @EXAMPLE:
+# discover_snapshots zfs my-sqlite.db dst my_pool my_pool
+# discover_snapshots zfs my-sqlite.db dst my_pool/my_fs my_pool
+# echo "select * from fs_dst join  snap_dst on fs_dst.guid = snap_dst.parent_guid" | sqlite3 pippo.db
+function discover_snapshots() {
+    local zcmd=${1}
+    local dbpath=${2}
+    local table_suffix=${3}
+    local fs=${4}
+    local pool=${5}
+    local parent_guid=$(
+        echo "SELECT guid FROM fs_${table_suffix} WHERE pool='${pool}' AND name = '${fs}' LIMIT 1" \
+        | ${cmd[sqlite3]} "${dbpath}"
+    )
+    ${zcmd} list \
+        -Hpr \
+        -d 1 \
+        -t snapshot \
+        -S creation \
+        -o guid,createtxg,creation,type,used,name \
+        ${fs} \
+    | sed \
+        -e 1000q \
+        -e "s:^:${parent_guid}|:" \
+        -e 's:\t:|:g' \
+        -e 's:@:|:' \
+    | ${cmd[sqlite3]} -csv -separator '|' ${dbpath} '.import /dev/stdin 'snap_${table_suffix}
+}
+
+
+# @FUNCTION: fill_snapshots_table
+# @USAGE: <zcmd> <dbpath> <table_suffix> <pool>
+# @DESCRIPTION:
+# Fill the snapshot table from known filesystems
+function fill_snapshots_table() {
+    local zcmd=${1}
+    local dbpath=${2}
+    local table_suffix=${3}
+    local pool=${4}
+
+    for fs in $(
+        echo "SELECT name FROM fs_${table_suffix} WHERE pool='${pool}' ORDER BY name" \
+        | ${cmd[sqlite3]} "${dbpath}"
+    ) ; do
+        discover_snapshots "${zcmd}" "${dbpath}" ${table_suffix} "${fs}" "${pool}"
+    done
+}
+
+
 # @FUNCTION: get_remote_fs_list
-# @USAGE: <pool>
+# @USAGE: <dbpath> <pool>
 # @DESCRIPTION:
 # Get the list of filesystems from a remote pool
 # The pool is excluded, both from list and from the name of the filesystem
+# @GLOBAL: cmd
 # @EXAMPLE:
-# declare -a filesystems=( $( get_remote_fs_list thez tank-thez ) )
+# declare -a filesystems=( $( get_remote_fs_list my-sqlite.db my_pool ) )
+# get_remote_fs_list ./pippo.db P000701
 function get_remote_fs_list() {
-    local pool=${1}
-    ${cmd[ssh]} ${rcmd[zfs]} list -Hpr -t filesystem -o name -s name ${pool} \
-    | tail -n +2 \
+    local dbpath=${1}
+    local pool=${2}
+    echo "SELECT name FROM fs_src WHERE pool='${pool}' AND name != pool ORDER BY name" \
+    | ${cmd[sqlite3]} "${dbpath}" \
     | sed -e "s:^${pool}/::"
 }
 
-# @FUNCTION: get_local_newest_snap
-# @USAGE: <filesystem>
+
+# @FUNCTION: get_newest_snap
+# @USAGE: <dbpath> <table_suffix> <filesystem> <pool>
 # @DESCRIPTION:
 # Get name of most recent snapshot from filesystem.
 # without the filesystem part
 # @EXAMPLE:
-# get_local_newest_snap P000204/pnpitalia/lxc/a037-ftp
-# @zfs-auto-snap_daily-2018-01-02-1230
-function get_local_newest_snap() {
-    local fs=${1}
-    ${cmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation ${fs} \
-    | head -n 1 \
-    | sed -e "s:^${fs}::"
+# get_newest_snap zfs my-sqlite.db src my_pool/my_fs
+# return: @zfs-auto-snap_daily-2018-01-02-1230
+function get_newest_snap() {
+    local dbpath=${1}
+    local table_suffix=${2}
+    local fs=${3}
+    local pool=${4}
+    echo "
+    SELECT '@' || s.snapshot
+    FROM fs_${table_suffix} AS f
+    JOIN snap_${table_suffix} AS s
+      ON f.guid = s.parent_guid
+    WHERE f.pool = '${pool}'
+      AND f.name = '${fs}'
+    ORDER BY s.creation DESC
+    LIMIT 1
+    " \
+    | ${cmd[sqlite3]} "${dbpath}" \
+    | sed -e "s:^${pool}/::"
 }
+
+
+# @FUNCTION: get_local_newest_snap
+# @USAGE: <dbpath> <filesystem> <pool>
+# @DESCRIPTION:
+# see get_newest_snap()
+function get_local_newest_snap() {
+    local dbpath=${1}
+    local fs=${2}
+    local pool=${3}
+    get_newest_snap "${dbpath}" dst "${fs}" ${pool}
+}
+
 
 # @FUNCTION: get_remote_newest_snap
-# @USAGE: <filesystem>
+# @USAGE: <dbpath> <filesystem> <pool>
 # @DESCRIPTION:
-# Get name of most recent snapshot from remote pool.
-# without the filesystem part
-# @EXAMPLE:
-# get_remote_newest_snap thez tank-thez/lxc/a037-ftp
-# @zfs-auto-snap_frequent-2018-01-04-2200
+# see get_newest_snap()
 function get_remote_newest_snap() {
-    local fs=${1}
-    ${cmd[ssh]} ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${fs} \
-    | head -n 1 \
-    | sed -e "s:^${fs}::"
+    local dbpath=${1}
+    local fs=${2}
+    local pool=${3}
+    get_newest_snap "${dbpath}" src "${fs}" ${pool}
 }
 
-# @FUNCTION: reconcile_snap
-# @USAGE: <local_filesystem> <remote_filesystem>
-# @DESCRIPTION:
-# In case last local snapshot is not present remotely a reconciliation is needed
-# the algorithm used here only work with snapshot which have date in the form
-# YYYY-MM-DD... into the snapshot name, luckily this is the case of zfs-auto-snapshot
-# @EXAMPLE:
-# reconcile_snap thez tank-thez/lxc/a037-ftp
-# @zfs-auto-snap_frequent-2018-01-04-2200
-function reconcile_snap() {
-    local lfs=${1}
-    local rfs=${2}
-
-    # 1) get the common snapshots
-    # 2) sort them by date/time
-    # 3) pick the latest
-    comm -12 --nocheck-order \
-        <( ${cmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation ${lfs} | sed -e "s:^${lfs}::" | sort -u ) \
-        <( ${cmd[ssh]} ${rcmd[zfs]} list -Hpr -d 1 -t snapshot -o name -S creation  ${rfs} | sed -e "s:^${rfs}::" | sort -u ) \
-    | sed -e "s:\(^.*\)\(20[0-9][0-9].*$\):\2,\0:" \
-    | sort -ur \
-    | head -n 1 \
-    | sed -e 's:^.*,::'
-
-}
-
-# @FUNCTION: filter_array
-# @USAGE: <array[@]>
-# @DESCRIPTION:
-# use global variable ${FS_SKIP} to remove matching strings
-# from given array.
-# ${FS_SKIP} is also an array of regular expressions these
-# are used by bash =~ comparison operator
-# @EXAMPLE:
-# filter_array $( get_remote_fs_list thez tank-thez )
-function filter_array() {
-    local ko=0
-    for i in ${@} ; do
-        ko=0
-        for filter in ${FS_SKIP[@]} ; do
-            if [[ ${i} =~ ${filter} ]] ; then
-                ko=1
-                break
-            fi
-        done
-        [[ ${ko} == 0 ]] && echo ${i}
-    done
-}
 
 # @FUNCTION: send_receive_fs
-# @USAGE: <src_filesystem> <dst_filesystem>
+# @USAGE: <dbpath> <src_filesystem> <dst_filesystem>
 # @DESCRIPTION:
 # Send and Receive zfs stream
 # @EXAMPLE:
-# send_receive_fs thez tank-thez P000204/pnpitalia
+# send_receive_fs my_pool backups_pool/my_pool
 function send_receive_fs() {
+    local dbpath=${1}
     # remote filesystem/pool
-    local fs=${1}
+    local fs=${2}
     # destination (local) filesystem
-    local dst=${2}
+    local dst=${3}
     # last snap on current pool, will be the base point for the incremental send
-    local current_snap=$( get_local_newest_snap ${dst} )
+    local current_snap=$( get_local_newest_snap ${dbpath} ${dst} ${LOCAL_POOL} )
     # last snap on the remote filesystem
-    local remote_snap=$( get_remote_newest_snap ${fs} )
+    local remote_snap=$( get_remote_newest_snap ${dbpath} ${fs} ${REMOTE_POOL} )
     # return code
     local rc=0
 
@@ -238,58 +376,44 @@ function send_receive_fs() {
             print_log error "failed ${fs}${current_snap} => ${remote_snap} (${rc})"
         fi
 
-        # destroy old snapshot if transfer was succesful
-        if [[ ${rc} == 0 ]] ; then
-            for k in ${KEEP_SNAP[@]} ; do
-                keep_num=${k%,*}
-                keep_label="${k#*,}"
-                ${cmd[zfs-auto-snapshot]} --quiet --syslog --destroy-only \
-                    --label="${keep_label}" --keep=${keep_num} \
-                    ${dst}
-            done
-        else
-            # try once more, no deletion this time
-            current_snap=$( reconcile_snap ${dst} ${fs} )
-            # NOTICE that we FORCE rewind to common snapshot locally
-            ${cmd[ssh]} "( \
-            ${rcmd[zfs]} send -I \
-                    ${fs}${current_snap} \
-                    ${fs}${remote_snap} \
-                | ${rcmd[${COMPRESS}]} ${COMPRESS_FLAGS} \
-            )" \
-            | ${COMPRESS} ${UNCOMPRESS_FLAGS} \
-            | ${cmd[zfs]} recv -F -du -x mountpoint ${dst} # /${fs}
-            rc=${?}
-            if [[ ${rc} != 0 ]]; then
-                print_log critical "${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation failed"
-            else
-                print_log warning "RECONCILIATION: ${fs}${current_snap} => ${remote_snap} (${rc}) reconciliation succeded"
-            fi
-        fi
+#         # destroy old snapshot if transfer was succesful
+#         if [[ ${rc} == 0 ]] ; then
+#             for k in ${KEEP_SNAP[@]} ; do
+#                 keep_num=${k%,*}
+#                 keep_label="${k#*,}"
+#                 ${cmd[zfs-auto-snapshot]} --quiet --syslog --destroy-only \
+#                     --label="${keep_label}" --keep=${keep_num} \
+#                     ${dst}
+#             done
+#         else
+#             print_log critical "${fs}${current_snap} => ${remote_snap} (${rc}) failed"
+#             # recv -F -du -x mountpoint ${dst}
+#         fi
     fi # [[ ${current_snap} == ${remote_snap} ]]
 
     return ${rc}
 }
 
 # @FUNCTION: send_receive_pool
-# @USAGE: <src_pool> <dst_pool/dst_filesystem>
+# @USAGE: <dbpath> <src_pool> <dst_pool/dst_filesystem>
 # @DESCRIPTION:
 # Recursively Send and Receive a pool
 # filesystems are looped, send is _not_ recursive (i.e. no -r)
 # @EXAMPLE:
 # send_receive_pool thez tank-thez P000204/pnpitalia
 function send_receive_pool() {
-    local remote_pool=${1}
-    local local_pool=${2}
+    local dbpath=${1}
+    local remote_pool=${2}
+    local local_pool=${3}
     local ret=0
 
     # pool
-    send_receive_fs ${remote_pool} ${local_pool}
+    send_receive_fs "${dbpath}" ${remote_pool} ${local_pool}
     ret=$(( ${ret} + ${?} ))
 
     # loop for all known filesystems
-    for fs in $( filter_array $( get_remote_fs_list ${remote_pool} ) ) ; do
-        send_receive_fs ${remote_pool}/${fs} ${local_pool}/${fs}
+    for fs in $( filter_array $( get_remote_fs_list ${dbpath} ${remote_pool} ) ) ; do
+        send_receive_fs "${dbpath}" ${remote_pool}/${fs} ${local_pool}/${fs}
         ret=$(( ${ret} + ${?} ))
     done
 
@@ -307,10 +431,11 @@ function send_receive_pool() {
     # Wait for lock on /run/${0##*/}.lock (fd 200) for 10 seconds
     ${cmd[flock]} -x -w 10 200 || exit 1
 
-    for conf in /etc/st-zfs-send-recv.d/*.pool ; do
+    for conf in /etc/${0##*/}.d/*.pool ; do
         [[ -e "${conf}" ]] && (
 
                 source "${conf}"
+                dbpath=$(mktemp /tmp/${LOCAL_POOL//\//--}-XXXXXXXX.db)
 
                 #### initialization of variables requiring remote #############
                 # associative array for commands (remote machine)
@@ -329,15 +454,23 @@ function send_receive_pool() {
                 # initialize the rcmd array it will be possible to call the command
                 # as `${rcmd[zfs]}` if command is missing exit with error
                 for c in zfs zfs-auto-snapshot ${COMPRESS} ; do
-                    rcmd[${c}]=$( ssh ${REMOTE_HOST} -- type -p ${c} )
+                    rcmd[${c}]=$( ${cmd[ssh]} type -p ${c} )
                     if [[ ${rcmd[${c}]} == "" ]] ; then
                         print_log critical "critical: remote command \"${c}\" not found (on ${REMOTE_HOST})! Exiting now."
                         exit 1
                     fi
                 done
-                ###############################################################
 
-                send_receive_pool ${REMOTE_POOL} ${LOCAL_POOL}
+                #### database initialization #############
+                initialize_db "${dbpath}"
+                discover_fs_list "${cmd[ssh]} ${rcmd[zfs]}" "${dbpath}" src ${REMOTE_POOL}
+                discover_fs_list ${cmd[zfs]} "${dbpath}" dst ${LOCAL_POOL}
+                fill_snapshots_table "${cmd[ssh]} ${rcmd[zfs]}" "${dbpath}" src ${REMOTE_POOL}
+                fill_snapshots_table ${cmd[zfs]} "${dbpath}" dst ${LOCAL_POOL}
+
+                #### send and receive #############
+                send_receive_pool "${dbpath}" ${REMOTE_POOL} ${LOCAL_POOL} \
+                && rm -f ${dbpath}
         )
     done
 
