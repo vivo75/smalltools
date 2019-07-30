@@ -181,15 +181,15 @@ function initialize_db() {
 EOSQL
 }
 
+
 # @FUNCTION: discover_fs_list
 # @USAGE: <zcmd> <dbpath> <table_suffix> <pool>
 # @DESCRIPTION:
 # Get the list of filesystems from zfs pool
 # @GLOBAL: cmd
 # @EXAMPLE:
-# discover_fs_list "ssh host -- zfs" my-sqlite.db src my_pool
-# discover_fs_list "${cmd[ssh]} ${rcmd[zfs]}" ./pippo.db src P000701
-# discover_fs_list zfs ./pippo.db dst traid1
+# discover_fs_list zfs my-sqlite.db src my_pool
+# discover_fs_list "${cmd[ssh]} ${rcmd[zfs]}" my-sqlite.db src my_pool
 function discover_fs_list() {
     local zcmd=${1}
     local dbpath=${2}
@@ -211,6 +211,7 @@ function discover_fs_list() {
         '.import /dev/stdin 'fs_${table_suffix}
 }
 
+
 # @FUNCTION: discover_snapshots
 # @USAGE: <zcmd> <dbpath> <table_suffix> <filesystem> <pool>
 # @DESCRIPTION:
@@ -218,7 +219,7 @@ function discover_fs_list() {
 # @EXAMPLE:
 # discover_snapshots zfs my-sqlite.db dst my_pool my_pool
 # discover_snapshots zfs my-sqlite.db dst my_pool/my_fs my_pool
-# echo "select * from fs_dst join  snap_dst on fs_dst.guid = snap_dst.parent_guid" | sqlite3 pippo.db
+# echo "select * from fs_dst join  snap_dst on fs_dst.guid = snap_dst.parent_guid" | sqlite3 my_sqlite.db
 function discover_snapshots() {
     local zcmd=${1}
     local dbpath=${2}
@@ -272,7 +273,6 @@ function fill_snapshots_table() {
 # @GLOBAL: cmd
 # @EXAMPLE:
 # declare -a filesystems=( $( get_remote_fs_list my-sqlite.db my_pool ) )
-# get_remote_fs_list ./pippo.db P000701
 function get_remote_fs_list() {
     local dbpath=${1}
     local pool=${2}
@@ -310,18 +310,6 @@ function get_newest_snap() {
 }
 
 
-# @FUNCTION: get_local_newest_snap
-# @USAGE: <dbpath> <filesystem> <pool>
-# @DESCRIPTION:
-# see get_newest_snap()
-function get_local_newest_snap() {
-    local dbpath=${1}
-    local fs=${2}
-    local pool=${3}
-    get_newest_snap "${dbpath}" dst "${fs}" ${pool}
-}
-
-
 # @FUNCTION: get_remote_newest_snap
 # @USAGE: <dbpath> <filesystem> <pool>
 # @DESCRIPTION:
@@ -331,6 +319,34 @@ function get_remote_newest_snap() {
     local fs=${2}
     local pool=${3}
     get_newest_snap "${dbpath}" src "${fs}" ${pool}
+}
+
+
+# @FUNCTION: get_common_snap
+# @USAGE: <dbpath> <filesystem> <src_pool>
+# @DESCRIPTION:
+# Get name of most recent _common_ snapshot.
+# @EXAMPLE:
+# get_common_snap my-sqlite.db my_pool/my_fs my_pool
+# return: @zfs-auto-snap_daily-2018-01-02-1230
+function get_common_snap() {
+    local dbpath=${1}
+    local fs=${2}
+    local src_pool=${3}
+    echo "
+    SELECT '@' || s1.snapshot
+    FROM fs_src AS f
+    JOIN snap_src AS s1
+      ON f.guid = s1.parent_guid
+    JOIN snap_dst AS s2
+      ON s1.guid = s2.guid
+    WHERE f.pool = '${src_pool}'
+      AND f.name = '${fs}'
+    ORDER BY s1.creation DESC
+    LIMIT 1
+    " \
+    | ${cmd[sqlite3]} "${dbpath}" \
+    | sed -e "s:^${pool}/::"
 }
 
 
@@ -347,7 +363,7 @@ function send_receive_fs() {
     # destination (local) filesystem
     local dst=${3}
     # last snap on current pool, will be the base point for the incremental send
-    local current_snap=$( get_local_newest_snap ${dbpath} ${dst} ${LOCAL_POOL} )
+    local current_snap=$( get_common_snap ${dbpath} ${fs} ${REMOTE_POOL} )
     # last snap on the remote filesystem
     local remote_snap=$( get_remote_newest_snap ${dbpath} ${fs} ${REMOTE_POOL} )
     # return code
@@ -376,23 +392,24 @@ function send_receive_fs() {
             print_log error "failed ${fs}${current_snap} => ${remote_snap} (${rc})"
         fi
 
-#         # destroy old snapshot if transfer was succesful
-#         if [[ ${rc} == 0 ]] ; then
-#             for k in ${KEEP_SNAP[@]} ; do
-#                 keep_num=${k%,*}
-#                 keep_label="${k#*,}"
-#                 ${cmd[zfs-auto-snapshot]} --quiet --syslog --destroy-only \
-#                     --label="${keep_label}" --keep=${keep_num} \
-#                     ${dst}
-#             done
-#         else
-#             print_log critical "${fs}${current_snap} => ${remote_snap} (${rc}) failed"
-#             # recv -F -du -x mountpoint ${dst}
-#         fi
+        # destroy old snapshot if transfer was succesful
+        if [[ ${rc} == 0 ]] ; then
+            for k in ${KEEP_SNAP[@]} ; do
+                keep_num=${k%,*}
+                keep_label="${k#*,}"
+                ${cmd[zfs-auto-snapshot]} --quiet --syslog --destroy-only \
+                    --label="${keep_label}" --keep=${keep_num} \
+                    ${dst}
+            done
+        else
+            print_log critical "${fs}${current_snap} => ${remote_snap} (${rc}) failed"
+            # recv -F -du -x mountpoint ${dst}
+        fi
     fi # [[ ${current_snap} == ${remote_snap} ]]
 
     return ${rc}
 }
+
 
 # @FUNCTION: send_receive_pool
 # @USAGE: <dbpath> <src_pool> <dst_pool/dst_filesystem>
