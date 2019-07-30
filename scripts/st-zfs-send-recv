@@ -28,33 +28,6 @@ else
     exit 1
 fi
 
-# we want boring english messagges
-LC_ALL=C
-
-# compression related variables
-COMPRESS="${COMPRESS:=lz4}"
-#COMPRESS_FLAGS=${COMPRESS_FLAGS:=}
-UNCOMPRESS_FLAGS="${UNCOMPRESS_FLAGS:=-dcfm}"
-
-# associative array for commands (local machine)
-declare -A cmd
-
-# check that we are root
-if test ${UID} -ne 0 ; then
-    echo "ERROR: need root privileges"
-    exit 1
-fi
-
-# initialize the cmd array it will be possible to call the command
-# as `${cmd[zfs]}` if command is missing exit with error
-for c in flock logger zfs zfs-auto-snapshot ${COMPRESS} ; do
-    cmd[${c}]=$( type -p ${c} )
-    if [[ ${cmd[${c}]} == "" ]] ; then
-        echo "ERROR: command \"${c}\" not found! Exiting now."
-        exit 1
-    fi
-done
-
 print_log () # level, message, ...
 {
     local prefix=st-zfs-send-recv
@@ -98,6 +71,34 @@ print_log () # level, message, ...
             ;;
     esac
 }
+
+
+# we want boring english messagges
+LC_ALL=C
+
+# compression related variables
+COMPRESS="${COMPRESS:=lz4}"
+#COMPRESS_FLAGS=${COMPRESS_FLAGS:=}
+UNCOMPRESS_FLAGS="${UNCOMPRESS_FLAGS:=-dcfm}"
+
+# associative array for commands (local machine)
+declare -A cmd
+
+# check that we are root
+if test ${UID} -ne 0 ; then
+    print_log critical "need root privileges"
+    exit 1
+fi
+
+# initialize the cmd array it will be possible to call the command
+# as `${cmd[zfs]}` if command is missing exit with error
+for c in flock logger zfs zfs-auto-snapshot sqlite3 ${COMPRESS} ; do
+    cmd[${c}]=$( type -p ${c} )
+    if [[ ${cmd[${c}]} == "" ]] ; then
+        print_log critical "command \"${c}\" not found! Exiting now."
+        exit 1
+    fi
+done
 
 ###############################################################################
 ####  functions
