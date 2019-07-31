@@ -282,6 +282,21 @@ function get_remote_fs_list() {
 }
 
 
+# @FUNCTION: get_fs_prop
+# @USAGE: <dbpath> <table_suffix> <field> <fs>
+# @DESCRIPTION:
+# query the fs table for any field
+function get_fs_prop() {
+    local dbpath=${1}
+    local table_suffix=${2}
+    local field=${3}
+    local fs=${4}
+    echo "SELECT ${field} FROM fs_${table_suffix} WHERE name ='${fs}' LIMIT 1" \
+    | ${cmd[sqlite3]} "${dbpath}" \
+    | sed -e "s:^${pool}/::"
+}
+
+
 # @FUNCTION: get_newest_snap
 # @USAGE: <dbpath> <table_suffix> <filesystem> <pool>
 # @DESCRIPTION:
@@ -296,14 +311,14 @@ function get_newest_snap() {
     local fs=${3}
     local pool=${4}
     echo "
-    SELECT '@' || s.snapshot
-    FROM fs_${table_suffix} AS f
-    JOIN snap_${table_suffix} AS s
-      ON f.guid = s.parent_guid
-    WHERE f.pool = '${pool}'
-      AND f.name = '${fs}'
-    ORDER BY s.creation DESC
-    LIMIT 1
+    SELECT '@' || s.snapshot \
+    FROM fs_${table_suffix} AS f \
+    JOIN snap_${table_suffix} AS s \
+      ON f.guid = s.parent_guid \
+    WHERE f.pool = '${pool}' \
+      AND f.name = '${fs}' \
+    ORDER BY s.creation DESC \
+    LIMIT 1 \
     " \
     | ${cmd[sqlite3]} "${dbpath}" \
     | sed -e "s:^${pool}/::"
@@ -333,17 +348,17 @@ function get_common_snap() {
     local dbpath=${1}
     local fs=${2}
     local src_pool=${3}
-    echo "
-    SELECT '@' || s1.snapshot
-    FROM fs_src AS f
-    JOIN snap_src AS s1
-      ON f.guid = s1.parent_guid
-    JOIN snap_dst AS s2
-      ON s1.guid = s2.guid
-    WHERE f.pool = '${src_pool}'
-      AND f.name = '${fs}'
-    ORDER BY s1.creation DESC
-    LIMIT 1
+    echo " \
+    SELECT '@' || s1.snapshot \
+    FROM fs_src AS f \
+    JOIN snap_src AS s1 \
+      ON f.guid = s1.parent_guid \
+    JOIN snap_dst AS s2 \
+      ON s1.guid = s2.guid \
+    WHERE f.pool = '${src_pool}' \
+      AND f.name = '${fs}' \
+    ORDER BY s1.creation DESC \
+    LIMIT 1 \
     " \
     | ${cmd[sqlite3]} "${dbpath}" \
     | sed -e "s:^${pool}/::"
@@ -373,11 +388,17 @@ function send_receive_fs() {
     local k
     local keep_num
     local keep_label
+    local ignore_mountpoint="-x mountpoint"
 
     if [[ ${current_snap} == ${remote_snap} ]] ; then
         print_log notice "${fs}${current_snap} is alreay up to date"
     else
         print_log notice "${fs}${current_snap} => ${remote_snap}"
+
+        # volumes have no mountpoint property
+        if [[ $(get_fs_prop ${dbpath} src type ${fs}) == volume ]] ; then
+            ignore_mountpoint=""
+        fi
         ${cmd[ssh]} "( \
         ${rcmd[zfs]} send -I \
                 ${fs}${current_snap} \
@@ -385,7 +406,7 @@ function send_receive_fs() {
             | ${rcmd[${COMPRESS}]} ${COMPRESS_FLAGS} \
         )" \
         | ${COMPRESS} ${UNCOMPRESS_FLAGS} \
-        | ${cmd[zfs]} recv -du -x mountpoint ${dst} # /${fs}
+        | ${cmd[zfs]} recv -F -du ${ignore_mountpoint} ${dst} # /${fs}
 
         rc=${?}
         if [[ ${rc} != 0 ]]; then
