@@ -400,7 +400,9 @@ function send_receive_fs() {
 
         # volumes have no mountpoint property
         if [[ $(get_fs_prop ${dbpath} src type ${fs}) == volume ]] ; then
-            ignore_mountpoint=""
+            ignore_mountpoint="-o volmode=none"
+        else
+            ignore_mountpoint="-x mountpoint"
         fi
         ${cmd[ssh]} "( \
         ${rcmd[zfs]} send -I \
@@ -409,7 +411,7 @@ function send_receive_fs() {
             | ${rcmd[${COMPRESS}]} ${COMPRESS_FLAGS} \
         )" \
         | ${COMPRESS} ${UNCOMPRESS_FLAGS} \
-        | ${cmd[zfs]} recv -F -du ${ignore_mountpoint} ${dst} # /${fs}
+        | ${cmd[zfs]} recv -F -eu ${ignore_mountpoint} ${dst}
 
         rc=${?}
         if [[ ${rc} != 0 ]]; then
