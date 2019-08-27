@@ -392,6 +392,9 @@ function send_receive_fs() {
 
     if [[ ${current_snap} == ${remote_snap} ]] ; then
         print_log notice "${fs}${current_snap} is alreay up to date"
+    else if [[ ${current_snap} == "" ]] ; then
+        print_log critical "${fs}${current_snap} Cannot find common snapshot"
+        rc=1
     else
         print_log notice "${fs}${current_snap} => ${remote_snap}"
 
@@ -426,6 +429,7 @@ function send_receive_fs() {
             print_log critical "${fs}${current_snap} => ${remote_snap} (${rc}) failed"
             # recv -F -du -x mountpoint ${dst}
         fi
+    fi # [[ ${current_snap} == "" ]]
     fi # [[ ${current_snap} == ${remote_snap} ]]
 
     return ${rc}
