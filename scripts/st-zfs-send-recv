@@ -227,7 +227,11 @@ function discover_snapshots() {
     local fs=${4}
     local pool=${5}
     local parent_guid=$(
-        echo "SELECT guid FROM fs_${table_suffix} WHERE pool='${pool}' AND name = '${fs}' LIMIT 1" \
+        echo "SELECT guid \
+        FROM fs_${table_suffix} \
+        WHERE pool='${pool}' AND name = '${fs}' \
+        ORDER BY s.creation DESC \
+        LIMIT 1" \
         | ${cmd[sqlite3]} "${dbpath}"
     )
     ${zcmd} list \
@@ -291,7 +295,11 @@ function get_fs_prop() {
     local table_suffix=${2}
     local field=${3}
     local fs=${4}
-    echo "SELECT ${field} FROM fs_${table_suffix} WHERE name ='${fs}' LIMIT 1" \
+    echo "SELECT ${field} \
+    FROM fs_${table_suffix} \
+    WHERE name ='${fs}' \
+    ORDER BY s.creation DESC \
+    LIMIT 1" \
     | ${cmd[sqlite3]} "${dbpath}" \
     | sed -e "s:^${pool}/::"
 }
