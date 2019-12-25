@@ -242,10 +242,10 @@ function discover_snapshots() {
         -o guid,createtxg,creation,type,used,name \
         ${fs} \
     | sed \
-        -e 1000q \
         -e "s:^:${parent_guid}|:" \
         -e 's:\t:|:g' \
         -e 's:@:|:' \
+        -e 1000q \
     | ${cmd[sqlite3]} -csv -separator '|' ${dbpath} '.import /dev/stdin 'snap_${table_suffix}
 }
 
