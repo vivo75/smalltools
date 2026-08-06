@@ -1,33 +1,121 @@
+# Example ZFS Backup Pool Configuration (YAML Format)
+# Location: /etc/st-zfs-send-recv.d/mypool.pool
 #
-# Example configuration file
-# st-zfs-pull-snap will loop for all *.pool files found in this directory
-
-# required
-# host to use with ssh.
-# it's very possible to have a specific entry in ~/.ssh/config
-# for this host, for example:
+# st-zfs-send-recv will process all *.pool files found in /etc/st-zfs-send-recv.d/
+# The filename (without extension) is used as the pool configuration name.
 #
-# Host myremote-host
-#     Hostname 1.2.3.4
-#     user my_sudo_enabled_user
-#     IdentityFile ~/.ssh/id_ed25519
-#     ControlMaster auto
-#     ControlPath ~/.ssh/master-%r@%h:%p.socket
-#     ControlPersist 5m
-REMOTE_HOST=myremote-host
+# This example shows all available configuration options for backing up a ZFS pool
+# from a remote host to local backup storage using incremental snapshots.
 
-# required
-# pool name on remote host
-REMOTE_POOL=tank
+# ==============================================================================
+# REQUIRED CONFIGURATION
+# ==============================================================================
 
-# required
-# destination pool or filesystem for zfs receive
-LOCAL_POOL=tank/filesystem
+# SSH hostname or IP address of the remote host containing the source ZFS pool
+# Tip: Configure SSH connection details in ~/.ssh/config for convenience
+#
+# Example SSH config (~/.ssh/config):
+#   Host myremote-host
+#       Hostname 1.2.3.4
+#       User my_sudo_enabled_user
+#       IdentityFile ~/.ssh/id_ed25519
+#       ControlMaster auto
+#       ControlPath ~/.ssh/master-%r@%h:%p.socket
+#       ControlPersist 5m
+#
+remote_host: myremote-host
 
-# optional
-# Compress/uncompress program, must be able to write/read a stream
-# to stdout/stdin.
-# Use `cat` with empty flags to avoid compression
+# ZFS pool name on the remote host to backup from
+# Examples: tank, data, pool1, storage/archives
+#
+remote_pool: tank
+
+# Local ZFS pool or filesystem to receive backups
+# Backups will be stored as children of this pool
+# Examples: backup, tank/backups, external/tank
+#
+local_pool: tank/filesystem
+
+
+# ==============================================================================
+# OPTIONAL COMPRESSION SETTINGS
+# ==============================================================================
+
+# Compression algorithm for stream transfer
+# Options: lz4 (default, fast), gzip, bzip2, zstd, lzma, xz, none
+# Default: lz4
+#
+# lz4     - Fast, good compression ratio (recommended for WAN)
+# gzip    - Traditional, widely available
+# zstd    - Modern, excellent ratio and speed
+# xz      - Maximum compression, slower
+# none    - No compression (for fast LAN)
+#
+compress: lz4
+
+# Custom flags for the compression command
+# Leave empty to use algorithm defaults
+# Examples: "-9" for max compression, "-1" for fast, "-c" to preserve input
+#
+compress_flags: ""
+
+# Flags for decompression (default: "-dcfm")
+# Most compression tools use these flags to decompress from stdin to stdout
+# Adjust if using a non-standard decompression command
+#
+uncompress_flags: "-dcfm"
+
+
+# ==============================================================================
+# OPTIONAL SNAPSHOT RETENTION POLICIES
+# ==============================================================================
+
+# Automatic cleanup of old snapshots based on zfs-auto-snapshot labels
+# This requires the zfs-auto-snapshot tool to create labeled snapshots
+# The tool will keep the N most recent snapshots matching each label
+#
+# Label matching works with snapshot names like:
+#   tank/fs@zfs-auto-snap_daily-2024-01-15-0000
+#   tank/fs@zfs-auto-snap_weekly-2024-01-14-0000
+#   tank/fs@zfs-auto-snap_monthly-2024-01-01-0000
+#
+keep_snapshots:
+  # Keep 7 most recent daily snapshots per filesystem
+  - count: 7
+    label: daily
+
+  # Keep 4 most recent weekly snapshots per filesystem
+  - count: 4
+    label: weekly
+
+  # Keep 12 most recent monthly snapshots per filesystem
+  - count: 12
+    label: monthly
+
+
+# ==============================================================================
+# OPTIONAL FILESYSTEM FILTERS
+# ==============================================================================
+
+# Regular expression patterns for filesystems to exclude from backup
+# Patterns are matched against the full filesystem name
+# Useful for temporary, cache, or non-critical filesystems
+#
+# IMPORTANT: These are Bash regex patterns, used with the =~ operator
+#
+# Examples:
+#   "^tank/docker$"      - Exact match for tank/docker only
+#   "^tank/temp"         - Exclude tank/temp and everything under it
+#   ".*\\.cache"         - Exclude anything with .cache in the name
+#   "^tank/(cache|tmp)"  - Multiple items with alternation
+#   "docker|lxc|vm"      - Multiple container types
+#
+skip_filesystems:
+  # Examples (uncomment to use):
+  # - "^tank/docker$"
+  # - "^tank/temp"
+  # - ".*\\.cache"
+  # - "^tank/var/(containers|vms)"
 # COMPRESS="lz4"
 
 # optional

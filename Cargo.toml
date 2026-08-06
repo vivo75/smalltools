@@ -1,0 +1,37 @@
+[package]
+name = "st-zfs-send-recv"
+version = "2.0.0"
+edition = "2021"
+authors = ["Francesco Riosa <fr@f1r.eu>"]
+license = "GPL-2.0"
+description = "Professional ZFS incremental backup tool over SSH"
+readme = "README.md"
+
+[[bin]]
+name = "st-zfs-send-recv"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1.40", features = ["full"] }
+openssh = "0.10"
+rusqlite = { version = "0.32", features = ["bundled", "chrono"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1.0"
+thiserror = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1.10"
+parking_lot = "0.12"
+fs-err = "2.11"
+tempfile = "3.12"
+libc = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[profile.dev]
+opt-level = 0
