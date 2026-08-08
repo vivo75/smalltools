@@ -1,0 +1,8 @@
+[package]
+name = "step2-ownership-and-structs"
+version = "0.1.0"
+edition = "2021"
+
+# Ancora nessuna dipendenza esterna: struct, ownership e Option sono
+# tutti concetti del linguaggio base, non di una libreria.
+[dependencies]

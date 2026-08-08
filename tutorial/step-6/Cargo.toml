@@ -1,0 +1,18 @@
+[package]
+name = "step6-modules-and-testing"
+version = "0.1.0"
+edition = "2021"
+
+# Pattern lib + bin, come nel progetto reale (vedi ../../src/lib.rs e
+# ../../src/main.rs): la libreria contiene tutta la logica testabile,
+# il binario è un wrapper sottile.
+[lib]
+name = "step6_modules_and_testing"
+path = "src/lib.rs"
+
+[[bin]]
+name = "step6-modules-and-testing"
+path = "src/main.rs"
+
+[dependencies]
+thiserror = "1.0"
