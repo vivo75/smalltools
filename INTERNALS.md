@@ -326,6 +326,8 @@ sequenceDiagram
     end
 ```
 
+> **Implementation note (verified against `src/ssh.rs` and `src/backup.rs`):** the diagram above shows `zfs send` and `zfs recv` as if they were connected by a live pipe. The current code does not do that: `SshSession::execute_zfs_send` (`src/ssh.rs:84`) calls `.output().await`, which waits for the remote `zfs send` to finish and buffers its **entire** stdout into a `Vec<u8>` client-side (on the backup host) before returning. `perform_incremental_backup` (`src/backup.rs:276`) then spawns `zfs recv` locally and writes that buffer to its stdin — a `stream data` step followed by a *separate* `execute zfs recv` step, not concurrent halves of one pipe. See the [timing example](#timing-example-gantt) below for what this means in practice, and [Memory Usage](#memory-usage) for the RAM implication.
+
 ---
 
 ## State Management
@@ -433,6 +435,46 @@ For a given filesystem:
    - For each retention policy (e.g., daily, weekly, monthly)
    - Keep N most recent matching label
    - Destroy older snapshots with matching label
+
+> **Implementation note:** steps 3–5 above describe the target design from `PROMPT.md`, not the current `src/backup.rs`. Today: step 3 runs `zfs send -I` with **no** compression stage (`PoolConfig.compress`/`compress_flags` are parsed from YAML but never read by `backup.rs`); step 4 runs plain `zfs recv` with **no** decompression stage (`uncompress_flags` is likewise unused); and step 5 does not exist at all — `keep_snapshots` is parsed but no `zfs-auto-snapshot --destroy-only` call is ever made. These are open items, not implemented behavior — see [Extensibility Points](#extensibility-points).
+
+### Timing Example (Gantt)
+
+The sequence diagram above shows *what* happens; the chart below estimates *how long*, and on which host, for one representative pool with three filesystems (`tank/data`, already in sync; `tank/new`, no common snapshot; `tank/logs`, needs a ~2 GiB incremental). Assumptions: effective SSH throughput ≈ 40 MB/s, local write throughput on the backup pool ≈ 150 MB/s. Real durations scale linearly with the actual delta size and available bandwidth — treat the numbers as illustrative, not a benchmark.
+
+```mermaid
+gantt
+    title st-zfs-send-recv — actual operation sequence (pool "tank")
+    dateFormat  HH:mm:ss
+    axisFormat  %M:%S
+    todayMarker off
+
+    section Local host (backup server)
+    Start, init logging (tracing)               :b1, 00:00:00, 1s
+    Load pool configs (*.pool)                  :b2, after b1, 1s
+    Verify local root privileges (geteuid)      :b3, after b2, 1s
+    Create temp SQLite DB (tempfile)             :b4, after b3, 1s
+    Initialize SQLite schema (4 tables)          :b5, 00:00:07, 1s
+    Discover local filesystems (zfs list)        :b6, 00:00:10, 1s
+    Discover local snapshots (loop per fs)       :b7, 00:00:14, 1s
+    tank/data: already in sync -> skip           :milestone, b8, 00:00:15, 1s
+    tank/new: no common snapshot -> error        :crit, milestone, b9, 00:00:16, 1s
+    tank/logs: incremental needed                :b10, 00:00:17, 1s
+    zfs recv -F -eu (writes buffered stream)     :crit, b11, 00:01:08, 14s
+    Delete temp SQLite DB                        :b12, after b11, 1s
+    Exit                                          :b13, after b12, 1s
+
+    section Network / SSH channel
+    Open SSH session (handshake + auth)          :n1, 00:00:04, 2s
+
+    section Remote host (source server, via SSH)
+    Verify privileges (root or sudo)             :s1, after n1, 1s
+    Discover remote filesystems (zfs list)       :s2, 00:00:08, 2s
+    Discover remote snapshots (loop, 3 fs)       :s3, 00:00:11, 3s
+    zfs send -I daily-01 daily-02 (buffered)     :crit, s4, 00:00:18, 50s
+```
+
+Total: **~84s**, of which **76% (64s of 84s)** is a single filesystem's `zfs send` → `zfs recv` pair — marked `crit` because they run **sequentially, not overlapped**: `zfs recv` cannot start until `zfs send` has finished and the whole stream has been buffered in memory on the backup host (see the implementation note above). With a true concurrent pipe, that segment would take `max(50s, 14s) = 50s` instead of `50s + 14s = 64s`, and the gap widens with the delta size. No compression or retention-cleanup steps appear in the chart because, as noted above, neither is wired into `backup.rs` today. Pools and filesystems are processed strictly one at a time — no parallelism (see [Concurrency Model](#concurrency-model)).
 
 ---
 
@@ -554,7 +596,7 @@ Exit
 
 - Streaming snapshot lists (1000 at a time max)
 - Database results streamed where possible
-- Binary ZFS stream data piped (not buffered in full)
+- **Binary ZFS stream data is fully buffered in memory on the backup host**, not piped: `SshSession::execute_zfs_send` collects the entire `zfs send` output into a `Vec<u8>` before `zfs recv` even starts (see the [implementation note](#backup-execution-flow) and [timing example](#timing-example-gantt)). For very large incremental deltas (100GB+, an edge case `PROMPT.md` explicitly calls out) this means a transient RAM spike on the backup host roughly proportional to the delta size, not a bounded block-sized buffer.
 
 ---
 
@@ -618,8 +660,8 @@ Exit
 | Component | Complexity | Notes |
 |-----------|-----------|-------|
 | Database | O(n × m) | n filesystems × m snapshots |
-| SSH buffers | O(block_size) | Streaming, not full data |
-| ZFS stream | O(block_size) | Piped, not buffered in memory |
+| SSH buffers | O(block_size) | Streaming, not full data (for `zfs list` output) |
+| ZFS stream | O(Δ) | Fully buffered in RAM on the backup host before `zfs recv` starts — see [Memory Usage](#memory-usage) |
 
 ### Typical Performance
 
