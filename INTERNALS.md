@@ -170,13 +170,14 @@ pub struct SshSession {
 **Key Methods**:
 - `new()` - Establish SSH connection
 - `check_root_privileges()` - Verify remote user permissions
-- `execute_zfs_list()` - Run remote `zfs list` commands
-- `execute_zfs_send()` - Run remote `zfs send` (returns binary data)
+- `execute_zfs_list()` - Run remote `zfs list` commands (buffers the text output; fine, it's small)
+- `spawn_zfs_send()` - Spawn remote `zfs send`, returning the running child with its stdout piped back for the caller to stream, rather than waiting for it to finish
 
 **Implementation Notes**:
 - Uses async/await via Tokio
 - Openssh crate handles SSH protocol
 - Automatic sudo detection and fallback
+- `spawn_zfs_send()`'s `Child` stdout implements `tokio::io::AsyncRead`, so `backup::perform_incremental_backup()` can pipe it straight into a local `zfs recv`'s stdin with `tokio::io::copy()` instead of buffering
 
 ### backup.rs - Core Backup Logic
 **Purpose**: Implements incremental backup algorithm
@@ -315,18 +316,17 @@ sequenceDiagram
     else no common snapshot
         backup-->>main: ERROR
     else need backup
-        backup->>ssh: execute_zfs_send()
-        ssh->>remote: zfs send -I common latest
-        remote-->>ssh: binary ZFS stream
-        ssh-->>backup: stream data
-        
-        backup->>local: execute zfs recv
-        local->>local: process stream
+        backup->>ssh: spawn_zfs_send()
+        ssh->>remote: zfs send -I common latest (spawned, not awaited)
+        backup->>local: spawn zfs recv -F -eu
+        remote-->>ssh: binary ZFS stream (as it's produced)
+        ssh-->>local: tokio::io::copy(send.stdout, recv.stdin)
+        local->>local: process stream incrementally
         local-->>backup: success
     end
 ```
 
-> **Implementation note (verified against `src/ssh.rs` and `src/backup.rs`):** the diagram above shows `zfs send` and `zfs recv` as if they were connected by a live pipe. The current code does not do that: `SshSession::execute_zfs_send` (`src/ssh.rs:84`) calls `.output().await`, which waits for the remote `zfs send` to finish and buffers its **entire** stdout into a `Vec<u8>` client-side (on the backup host) before returning. `perform_incremental_backup` (`src/backup.rs:276`) then spawns `zfs recv` locally and writes that buffer to its stdin — a `stream data` step followed by a *separate* `execute zfs recv` step, not concurrent halves of one pipe. See the [timing example](#timing-example-gantt) below for what this means in practice, and [Memory Usage](#memory-usage) for the RAM implication.
+> **Implementation note (verified against `src/ssh.rs` and `src/backup.rs`):** the diagram above now matches the code — `zfs send` and `zfs recv` are connected by a live pipe. `SshSession::spawn_zfs_send` (`src/ssh.rs:89`) spawns the remote `zfs send` with `Stdio::piped()` and returns immediately with the running `Child`, instead of waiting for it to finish. `perform_incremental_backup` (`src/backup.rs:276`) spawns the local `zfs recv` concurrently, then uses `tokio::io::copy` (`src/backup.rs:337`) to stream bytes directly from the remote child's stdout into the local child's stdin, so `zfs recv` starts consuming and writing data as soon as the first bytes arrive rather than after the whole stream has been buffered. stderr from both processes is drained concurrently via `tokio::join!` so error output is still captured even though nothing is buffered in bulk. See the [timing example](#timing-example-gantt) below for what this means in practice, and [Memory Usage](#memory-usage) for the RAM implication.
 
 ---
 
@@ -460,7 +460,7 @@ gantt
     tank/data: already in sync -> skip           :milestone, b8, 00:00:15, 1s
     tank/new: no common snapshot -> error        :crit, milestone, b9, 00:00:16, 1s
     tank/logs: incremental needed                :b10, 00:00:17, 1s
-    zfs recv -F -eu (writes buffered stream)     :crit, b11, 00:01:08, 14s
+    zfs recv -F -eu (consumes stream as it arrives) :crit, b11, 00:00:19, 51s
     Delete temp SQLite DB                        :b12, after b11, 1s
     Exit                                          :b13, after b12, 1s
 
@@ -471,10 +471,10 @@ gantt
     Verify privileges (root or sudo)             :s1, after n1, 1s
     Discover remote filesystems (zfs list)       :s2, 00:00:08, 2s
     Discover remote snapshots (loop, 3 fs)       :s3, 00:00:11, 3s
-    zfs send -I daily-01 daily-02 (buffered)     :crit, s4, 00:00:18, 50s
+    zfs send -I daily-01 daily-02 (streamed)     :crit, s4, 00:00:18, 50s
 ```
 
-Total: **~84s**, of which **76% (64s of 84s)** is a single filesystem's `zfs send` → `zfs recv` pair — marked `crit` because they run **sequentially, not overlapped**: `zfs recv` cannot start until `zfs send` has finished and the whole stream has been buffered in memory on the backup host (see the implementation note above). With a true concurrent pipe, that segment would take `max(50s, 14s) = 50s` instead of `50s + 14s = 64s`, and the gap widens with the delta size. No compression or retention-cleanup steps appear in the chart because, as noted above, neither is wired into `backup.rs` today. Pools and filesystems are processed strictly one at a time — no parallelism (see [Concurrency Model](#concurrency-model)).
+Total: **~72s**, of which **71% (51s of 72s)** is a single filesystem's `zfs send` → `zfs recv` pair. Both are still marked `crit` — they dominate the timeline — but they now run **concurrently, as two halves of one pipe**: `zfs recv` is spawned before `zfs send` even starts producing data, and `tokio::io::copy` streams bytes from one to the other as they arrive, so `recv` starts about a second after `send` (SSH pipe + first-byte latency) instead of after the full ~2 GiB stream has landed in memory. Wall-clock time for the pair is now bound by `max(network throughput, local write throughput)` rather than their sum — and since the assumed SSH throughput here (40 MB/s) is well below local write throughput (150 MB/s), `recv` is network-bound and finishes only moments after `send` does (51s vs. 50s), not 14s after it like the old buffer-then-write sequence. That's a ~13s savings in this example, and the gap widens with the delta size. No compression or retention-cleanup steps appear in the chart because, as noted above, neither is wired into `backup.rs` today. Pools and filesystems are processed strictly one at a time — no parallelism (see [Concurrency Model](#concurrency-model)).
 
 ---
 
@@ -596,7 +596,7 @@ Exit
 
 - Streaming snapshot lists (1000 at a time max)
 - Database results streamed where possible
-- **Binary ZFS stream data is fully buffered in memory on the backup host**, not piped: `SshSession::execute_zfs_send` collects the entire `zfs send` output into a `Vec<u8>` before `zfs recv` even starts (see the [implementation note](#backup-execution-flow) and [timing example](#timing-example-gantt)). For very large incremental deltas (100GB+, an edge case `PROMPT.md` explicitly calls out) this means a transient RAM spike on the backup host roughly proportional to the delta size, not a bounded block-sized buffer.
+- **Binary ZFS stream data is piped, not buffered**: `SshSession::spawn_zfs_send` returns the running remote `zfs send` child immediately, and `perform_incremental_backup` streams its stdout directly into a local `zfs recv`'s stdin via `tokio::io::copy` (see the [implementation note](#backup-execution-flow) and [timing example](#timing-example-gantt)). Memory usage for the transfer itself is bounded by the OS pipe buffer size (typically 64 KiB), not the delta size — even for very large incremental deltas (100GB+, an edge case `PROMPT.md` explicitly calls out) there is no RAM spike proportional to the stream size.
 
 ---
 
@@ -661,7 +661,7 @@ Exit
 |-----------|-----------|-------|
 | Database | O(n × m) | n filesystems × m snapshots |
 | SSH buffers | O(block_size) | Streaming, not full data (for `zfs list` output) |
-| ZFS stream | O(Δ) | Fully buffered in RAM on the backup host before `zfs recv` starts — see [Memory Usage](#memory-usage) |
+| ZFS stream | O(block_size) | Piped directly from `zfs send` to `zfs recv`, bounded by the OS pipe buffer, not the delta size Δ — see [Memory Usage](#memory-usage) |
 
 ### Typical Performance
 
