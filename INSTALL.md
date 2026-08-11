@@ -79,6 +79,11 @@ sudo mkdir -p /etc/st-zfs-send-recv.d
 sudo chmod 755 /etc/st-zfs-send-recv.d
 ```
 
+`/etc/st-zfs-send-recv.d` is the default location. To use a different directory instead,
+pass `--config-dir <path>` on the command line, or set the `ST_CONFIG_DIR` environment
+variable (the `--config-dir` flag takes precedence if both are set). See
+[Configuration Directory](#configuration-directory) below.
+
 ### 3. Create Log Directory (Optional)
 
 ```bash
@@ -87,6 +92,19 @@ sudo chmod 755 /var/log/st-zfs-send-recv
 ```
 
 ## Configuration
+
+### Configuration Directory
+
+By default, pool configuration files are read from `/etc/st-zfs-send-recv.d`. Override it with:
+
+| Method | Example | Precedence |
+|--------|---------|------------|
+| `--config-dir` flag | `st-zfs-send-recv --config-dir /opt/st-zfs/conf.d` | Highest |
+| `ST_CONFIG_DIR` env var | `ST_CONFIG_DIR=/opt/st-zfs/conf.d st-zfs-send-recv` | Used if flag is absent |
+| Default | `/etc/st-zfs-send-recv.d` | Used if neither is set |
+
+If a non-default directory is used, substitute it for `/etc/st-zfs-send-recv.d` in the
+remaining steps of this guide.
 
 ### 1. Create Pool Configuration Files
 
@@ -152,6 +170,9 @@ Host backup.example.com
 ```bash
 # Test with debug logging
 RUST_LOG=debug sudo /usr/local/bin/st-zfs-send-recv
+
+# Test with debug logging against a non-default config directory
+RUST_LOG=debug sudo /usr/local/bin/st-zfs-send-recv --config-dir /opt/st-zfs/conf.d
 ```
 
 Watch for:

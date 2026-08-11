@@ -1,4 +1,5 @@
 use anyhow::Result;
+use clap::Parser;
 use std::path::PathBuf;
 use tracing::info;
 
@@ -9,15 +10,25 @@ mod error;
 mod logger;
 mod ssh;
 
+#[derive(Parser)]
+#[command(version, about, long_about = None)]
+struct Cli {
+    /// Directory containing pool configuration files
+    #[arg(long, env = "ST_CONFIG_DIR", default_value = "/etc/st-zfs-send-recv.d")]
+    config_dir: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
     // Initialize logging
     logger::init();
 
     info!("st-zfs-send-recv starting");
 
     // Parse configuration files
-    let config_dir = PathBuf::from("/etc/st-zfs-send-recv.d");
+    let config_dir = cli.config_dir;
     let configs = config::load_pool_configs(&config_dir)?;
 
     if configs.is_empty() {

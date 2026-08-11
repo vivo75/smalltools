@@ -54,6 +54,18 @@ sudo chmod 750 /etc/st-zfs-send-recv.d
 
 Pool configurations are YAML files located in `/etc/st-zfs-send-recv.d/*.pool`.
 
+### Configuration Directory
+
+By default, pool configuration files are read from `/etc/st-zfs-send-recv.d`. This can be overridden with:
+
+| Method | Example | Precedence |
+|--------|---------|------------|
+| `--config-dir` flag | `st-zfs-send-recv --config-dir /opt/st-zfs/conf.d` | Highest |
+| `ST_CONFIG_DIR` env var | `ST_CONFIG_DIR=/opt/st-zfs/conf.d st-zfs-send-recv` | Used if flag is absent |
+| Default | `/etc/st-zfs-send-recv.d` | Used if neither is set |
+
+If both are provided, `--config-dir` wins.
+
 ### Minimal Configuration Example
 
 ```yaml
@@ -129,6 +141,10 @@ RUST_LOG=debug sudo st-zfs-send-recv
 
 # With trace-level logging
 RUST_LOG=st_zfs_send_recv=trace sudo st-zfs-send-recv
+
+# Using a non-default configuration directory
+sudo st-zfs-send-recv --config-dir /opt/st-zfs/conf.d
+sudo ST_CONFIG_DIR=/opt/st-zfs/conf.d st-zfs-send-recv
 ```
 
 ### Scheduled Backups
