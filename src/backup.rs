@@ -280,9 +280,9 @@ async fn perform_incremental_backup(
     common_snap: &str,
     remote_snap: &str,
 ) -> Result<()> {
-    // Execute remote: zfs send -I remote_fs{common_snap} remote_fs{remote_snap} | compress
-    // Pipe through: uncompress | zfs recv -F -eu local_fs
-
+    // Stream: remote `zfs send -I` stdout -> local `zfs recv` stdin, so `zfs recv`
+    // starts consuming data as soon as it arrives instead of waiting for the whole
+    // send stream to be buffered in memory first.
     let send_cmd = format!(
         "zfs send -I {} {}",
         format!("{}{}", remote_fs, common_snap),
@@ -291,10 +291,8 @@ async fn perform_incremental_backup(
 
     debug!("Executing remote command: {}", send_cmd);
 
-    // This is a simplified version - a full implementation would handle compression
-    // and proper piping of binary ZFS streams
-    let output = ssh
-        .execute_zfs_send(&[
+    let mut send_child = ssh
+        .spawn_zfs_send(&[
             "send",
             "-I",
             &format!("{}{}", remote_fs, common_snap),
@@ -302,8 +300,17 @@ async fn perform_incremental_backup(
         ])
         .await?;
 
+    let mut send_stdout = send_child
+        .stdout()
+        .take()
+        .context("zfs send child is missing stdout")?;
+    let mut send_stderr = send_child
+        .stderr()
+        .take()
+        .context("zfs send child is missing stderr")?;
+
     // Receive on local side
-    let mut recv_cmd = Command::new("zfs")
+    let mut recv_child = Command::new("zfs")
         .args(&["recv", "-F", "-eu", local_fs])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -311,16 +318,66 @@ async fn perform_incremental_backup(
         .spawn()
         .context("Failed to spawn zfs recv")?;
 
-    if let Some(mut stdin) = recv_cmd.stdin.take() {
-        use tokio::io::AsyncWriteExt;
-        stdin.write_all(&output).await?;
+    let mut recv_stdin = recv_child
+        .stdin
+        .take()
+        .context("zfs recv child is missing stdin")?;
+    let mut recv_stdout = recv_child
+        .stdout
+        .take()
+        .context("zfs recv child is missing stdout")?;
+    let mut recv_stderr = recv_child
+        .stderr
+        .take()
+        .context("zfs recv child is missing stderr")?;
+
+    use tokio::io::AsyncReadExt;
+
+    let copy_fut = async move {
+        let result = tokio::io::copy(&mut send_stdout, &mut recv_stdin).await;
+        // Close stdin so `zfs recv` sees EOF even if the stream ended early.
+        drop(recv_stdin);
+        result
+    };
+    let send_stderr_fut = async move {
+        let mut buf = Vec::new();
+        let _ = send_stderr.read_to_end(&mut buf).await;
+        buf
+    };
+    let recv_stdout_fut = async move {
+        let mut buf = Vec::new();
+        let _ = recv_stdout.read_to_end(&mut buf).await;
+        buf
+    };
+    let recv_stderr_fut = async move {
+        let mut buf = Vec::new();
+        let _ = recv_stderr.read_to_end(&mut buf).await;
+        buf
+    };
+
+    let (copy_result, send_stderr_buf, _recv_stdout_buf, recv_stderr_buf) =
+        tokio::join!(copy_fut, send_stderr_fut, recv_stdout_fut, recv_stderr_fut);
+
+    let recv_status = recv_child.wait().await?;
+    let send_status = send_child.wait().await?;
+
+    if !send_status.success() {
+        anyhow::bail!(
+            "zfs send failed: {}",
+            String::from_utf8_lossy(&send_stderr_buf).trim()
+        );
     }
 
-    let status = recv_cmd.wait().await?;
-
-    if !status.success() {
-        anyhow::bail!("zfs recv failed with status: {}", status);
+    if !recv_status.success() {
+        anyhow::bail!(
+            "zfs recv failed with status {}: {}",
+            recv_status,
+            String::from_utf8_lossy(&recv_stderr_buf).trim()
+        );
     }
+
+    let bytes_streamed = copy_result.context("Failed to stream zfs send data into zfs recv")?;
+    debug!("Streamed {} bytes from zfs send to zfs recv", bytes_streamed);
 
     Ok(())
 }

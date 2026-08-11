@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use openssh::Session;
+use openssh::{Child, Session, Stdio};
 use std::process::Output;
 use tracing::{debug, warn};
 
@@ -81,27 +81,25 @@ impl SshSession {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
-    pub async fn execute_zfs_send(
-        &self,
-        args: &[&str],
-    ) -> Result<Vec<u8>> {
+    /// Spawns `zfs send` on the remote host and returns the running child process
+    /// with its stdout/stderr piped back, without waiting for it to finish or
+    /// buffering its output. Callers should stream `child.stdout()` directly into
+    /// the destination (e.g. a local `zfs recv`'s stdin) so the send stream never
+    /// has to be held in memory in full.
+    pub async fn spawn_zfs_send(&self, args: &[&str]) -> Result<Child<&Session>> {
         let mut cmd = self.session.command("zfs");
 
         for arg in args {
             cmd.arg(arg);
         }
 
-        let output = cmd
-            .output()
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        cmd.spawn()
             .await
-            .context("Failed to execute zfs send command")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("zfs send failed: {}", stderr);
-        }
-
-        Ok(output.stdout)
+            .context("Failed to spawn zfs send command")
     }
 
     #[allow(dead_code)]
