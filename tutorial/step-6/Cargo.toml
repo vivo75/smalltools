@@ -1,7 +1,7 @@
 [package]
 name = "step6-modules-and-testing"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 # Pattern lib + bin, come nel progetto reale (vedi ../../src/lib.rs e
 # ../../src/main.rs): la libreria contiene tutta la logica testabile,

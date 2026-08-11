@@ -1,7 +1,7 @@
 [package]
 name = "step1-getting-started"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 # Nessuna dipendenza esterna in questo primo passo: vogliamo vedere cosa
 # offre Rust "di serie", prima di aggiungere crate esterne (l'equivalente
